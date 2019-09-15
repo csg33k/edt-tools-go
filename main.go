@@ -17,12 +17,13 @@ func main() {
 	slow := flag.Bool("slow", false, "slow")
 	custom := flag.String("custom", "", "a custom config DATA_SOURCE,URL Pattern")
 	customFile := flag.String("file", "", "input file")
+	batchSize := flag.Int("batch", 500, "Override batch size")
 
 	flag.Parse()
-	params := support.Parameters{DryRun: *dryRun, Slow: *slow, Custom: *custom, InputFile: *customFile}
+	params := support.Parameters{DryRun: *dryRun, Slow: *slow, Custom: *custom, InputFile: *customFile, BatchSize: *batchSize}
 	if *custom != "" {
 		split := strings.Split(*custom, ",")
-		integration, valid:= support.IntegrationMappings[split[0]]
+		integration, valid := support.IntegrationMappings[split[0]]
 		if valid {
 			support.IntegrationMappings[support.CUSTOM] = support.Integration{DataSource: split[0], Url: integration.Url}
 		} else {
@@ -56,28 +57,40 @@ func processUrls(params support.Parameters) {
 	}
 
 	i := 0
+	batchSize := params.BatchSize
+	fmt.Printf("Starting Thread URL calls to force tasks for datasource: %s calling %d endpoints" , params.Custom, len(urls))
 	for _, url := range urls {
 		if params.Slow {
-			callUrlSequential(url, i)
+			callUrlSequential(url, i, params.DryRun)
 		} else {
 			go callUrlConcurrent(url, ch, i, params.DryRun) // start a goroutine
 		}
 		i += 1
+		if i%batchSize == 0 {
+			getResponses(params, batchSize, ch)
+		}
+		if !params.DryRun {
+			time.Sleep(100 * time.Millisecond) // throttle
+		}
+
 	}
 
-	if params.DryRun {
-		logUrlsToFile("/tmp/urls.txt", urls, ch)
-	} else {
-		if !params.Slow {
-			for range urls {
-				res := <-ch
-				fmt.Println(res) // receive from hannel ch
-
-			}
-		}
+	if i%batchSize != 0 {
+		getResponses(params, i%batchSize, ch)
 	}
 
 	fmt.Printf("%.2fs elapsed\n", time.Since(start).Seconds())
+}
+
+func getResponses(params support.Parameters, len int, ch chan string) {
+	if !params.Slow {
+		for i := 0; i < len; i++ {
+			res := <-ch
+			fmt.Println(res)
+
+		}
+	}
+
 }
 
 func logUrlsToFile(fileName string, urls []string, ch chan string) {
@@ -118,8 +131,12 @@ func readFile(in string) []string {
 	return split
 }
 
-func callUrlSequential(url string, i int) {
+func callUrlSequential(url string, i int, dryRun bool) {
 	fmt.Printf("%d:  Calling URL: %s", i, url)
+	if dryRun {
+		fmt.Printf("\n")
+		return
+	}
 	resp, err := http.Get(url)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "fetch: %v\n", err)
@@ -129,17 +146,15 @@ func callUrlSequential(url string, i int) {
 	resp.Body.Close()
 	support.Check(err)
 	fmt.Printf(" response is: %s\n", b)
-	//time.Sleep(100 * time.Millisecond) // throttle
 
 }
 
 func callUrlConcurrent(url string, ch chan string, requestCnt int, dryRun bool) {
 	if dryRun {
-		ch <- fmt.Sprintf("%s", url)
+		ch <- fmt.Sprintf("id: %d, called: %s", requestCnt, url)
 		return
-	} else {
-		fmt.Printf("Calling url %s concurrently\n", url)
 	}
+
 	start := time.Now()
 	resp, err := http.Get(url)
 	if err != nil {
